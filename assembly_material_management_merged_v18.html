@@ -36,7 +36,10 @@
     .guide-card span { display: block; color: var(--muted); font-size: 12px; line-height: 1.55; }
     .module-note { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin: 0 0 12px; padding: 12px 14px; border-radius: 16px; border: 1px solid var(--line); background: rgba(255,255,255,.86); color: var(--muted); font-size: 13px; line-height: 1.6; }
     .module-note strong { color: var(--text); }
-    .pill { flex: 0 0 auto; display: inline-flex; align-items: center; border-radius: 999px; padding: 6px 10px; background: #eff6ff; color: #1d4ed8; font-size: 12px; font-weight: 800; }
+    .pill { flex: 0 0 auto; display: inline-flex; align-items: center; border-radius: 999px; padding: 6px 10px; background: #eff6ff; color: #1d4ed8; font-size: 12px; font-weight: 800; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pill.busy { background: #fef3c7; color: #92400e; }
+    .pill.error { background: #fee2e2; color: #991b1b; }
+    .pill[data-state="ok"] { background: #ecfdf5; color: #047857; }
     .frame-wrap { display: none; border: 1px solid rgba(219,228,240,.95); border-radius: 22px; background: var(--surface-2); box-shadow: var(--shadow); overflow: hidden; }
     .frame-wrap.active { display: block; }
     iframe { display: block; width: 100%; height: calc(100vh - 206px); min-height: 720px; border: 0; background: #fff; }
@@ -91,7 +94,7 @@
     </section>
     <div class="module-note" id="moduleNote">
       <span><strong>当前模块：入库装箱 / 库存管理。</strong>用于新建箱子、可选绑定货架，按零件物料/半成品/成品/不良品录入库存，导入 BOM 补全、导出 Excel/JSON。</span>
-      <span class="pill">本地浏览器保存数据</span>
+      <span class="pill" id="syncPill" data-state="idle">未登录</span>
     </div>
     <section id="inventoryWrap" class="frame-wrap active" aria-label="入库装箱与库存管理模块"><iframe id="inventoryFrame" title="入库装箱与库存管理"></iframe><div class="fallback">如果页面没有显示，请使用支持 iframe srcdoc 的现代浏览器打开。</div></section>
     <section id="pickingWrap" class="frame-wrap" aria-label="生产领料与BOM拣货模块"><iframe id="pickingFrame" title="生产领料与BOM拣货"></iframe><div class="fallback">如果页面没有显示，请使用支持 iframe srcdoc 的现代浏览器打开。</div></section>
@@ -103,18 +106,36 @@
     const SUPABASE_URL = 'https://wkcgsvtdnsdwydusqepw.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndrY2dzdnRkbnNkd3lkdXNxZXB3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA1MzYyMjUsImV4cCI6MjA5NjExMjIyNX0.fQfFsDdj2E3oDYqgCI_DnPqVKwN4aZGgDi-ruN55Pd8';
     const APP_STORAGE_PREFIX = 'assembly_';
-    const APP_STORAGE_KEYS = new Set(['box_inventory_site_v1']);
+    const APP_STORAGE_KEYS = new Set(['box_inventory_site_v1', 'box_inventory_shelf_lock_v1', 'box_inventory_box_lock_v1']);
     const STORAGE_TABLE = 'assembly_user_state';
+    const INVENTORY_STORAGE_KEY = 'box_inventory_site_v1';
     const hasSupabaseConfig = SUPABASE_URL && SUPABASE_ANON_KEY;
     const supabaseClient = hasSupabaseConfig ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
     let currentUser = null;
     let cloudSyncTimer = null;
     let cloudReady = false;
+    let cloudLoading = false;
+    let lastSyncError = '';
+    const frameMap = [
+      ['inventoryFrame', 'inventory'],
+      ['pickingFrame', 'picking'],
+      ['outboundFrame', 'outbound'],
+      ['returnsFrame', 'returns']
+    ];
 
     function setAuthStatus(message, isError = false) {
       const statusEl = document.getElementById('authStatus');
       statusEl.textContent = message || '';
       statusEl.classList.toggle('error', Boolean(isError));
+    }
+
+    function setSyncStatus(message, state = 'idle') {
+      const pill = document.getElementById('syncPill');
+      if (!pill) return;
+      pill.textContent = message || '';
+      pill.dataset.state = state;
+      pill.classList.toggle('error', state === 'error');
+      pill.classList.toggle('busy', state === 'loading' || state === 'saving');
     }
 
     function accountToEmail(account) {
@@ -138,6 +159,35 @@
       return Boolean(key) && (key.startsWith(APP_STORAGE_PREFIX) || APP_STORAGE_KEYS.has(key));
     }
 
+    function parseInventoryPayload(raw) {
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        return {
+          boxes: Array.isArray(parsed.boxes) ? parsed.boxes : [],
+          bom: Array.isArray(parsed.bom) ? parsed.bom : [],
+          binds: Array.isArray(parsed.binds) ? parsed.binds : []
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    function hasMeaningfulPayload(payload) {
+      if (!payload || typeof payload !== 'object') return false;
+      const inv = parseInventoryPayload(payload[INVENTORY_STORAGE_KEY]);
+      if (inv && (inv.boxes.length || inv.bom.length || inv.binds.length)) return true;
+      return Object.entries(payload).some(([key, value]) => {
+        if (!isAppStorageKey(key) || key === INVENTORY_STORAGE_KEY) return false;
+        return typeof value === 'string' && value.trim() && value !== '[]' && value !== '{}';
+      });
+    }
+
+    function hasMeaningfulLocalState() {
+      return hasMeaningfulPayload(collectAppStorage());
+    }
+
     function collectAppStorage() {
       const payload = {};
       for (let i = 0; i < localStorage.length; i++) {
@@ -158,39 +208,88 @@
       });
     }
 
+    function broadcastStorageToFrames(payload = collectAppStorage()) {
+      frameMap.forEach(([frameId]) => {
+        const frame = document.getElementById(frameId);
+        if (!frame?.contentWindow) return;
+        frame.contentWindow.postMessage({ type: 'assembly-apply-storage', payload }, '*');
+      });
+    }
+
     async function loadCloudState() {
       if (!supabaseClient || !currentUser) return;
       cloudReady = false;
+      cloudLoading = true;
+      lastSyncError = '';
+      setSyncStatus('正在从云端加载…', 'loading');
       const { data, error } = await supabaseClient
         .from(STORAGE_TABLE)
         .select('payload')
         .eq('user_id', currentUser.id)
         .maybeSingle();
-      if (error) throw error;
-      if (data) {
-        restoreAppStorage(data.payload);
-      } else {
-        cloudReady = true;
-        await saveCloudState();
-        return;
+      if (error) {
+        cloudLoading = false;
+        lastSyncError = getAuthErrorMessage(error);
+        setSyncStatus(`云端加载失败：${lastSyncError}`, 'error');
+        throw error;
+      }
+      const remotePayload = data?.payload;
+      const remoteHasData = hasMeaningfulPayload(remotePayload);
+      if (remoteHasData) {
+        restoreAppStorage(remotePayload);
+      } else if (!data && hasMeaningfulLocalState()) {
+        restoreAppStorage(collectAppStorage());
+      } else if (remotePayload && typeof remotePayload === 'object') {
+        restoreAppStorage(remotePayload);
       }
       cloudReady = true;
+      cloudLoading = false;
+      reloadAllFrames(true);
+      broadcastStorageToFrames();
+      if (!data && hasMeaningfulLocalState()) {
+        setSyncStatus('正在初始化云端…', 'saving');
+        await saveCloudState();
+      }
+      setSyncStatus(remoteHasData || data ? '云端已同步' : '本地就绪（云端暂无数据）', 'ok');
     }
 
     async function saveCloudState() {
-      if (!supabaseClient || !currentUser || !cloudReady) return;
+      if (!supabaseClient || !currentUser || !cloudReady || cloudLoading) return;
       const payload = collectAppStorage();
+      if (!hasMeaningfulPayload(payload)) {
+        const { data: remoteRow, error: readError } = await supabaseClient
+          .from(STORAGE_TABLE)
+          .select('payload')
+          .eq('user_id', currentUser.id)
+          .maybeSingle();
+        if (readError) throw readError;
+        if (hasMeaningfulPayload(remoteRow?.payload)) {
+          setSyncStatus('已跳过空数据上传（云端仍有数据）', 'ok');
+          return;
+        }
+      }
+      setSyncStatus('正在保存到云端…', 'saving');
       const { error } = await supabaseClient.from(STORAGE_TABLE).upsert(
         { user_id: currentUser.id, payload, updated_at: new Date().toISOString() },
         { onConflict: 'user_id' }
       );
-      if (error) throw error;
+      if (error) {
+        lastSyncError = getAuthErrorMessage(error);
+        setSyncStatus(`保存失败：${lastSyncError}`, 'error');
+        throw error;
+      }
+      setSyncStatus('云端已同步', 'ok');
     }
 
     function scheduleCloudSave() {
-      if (!supabaseClient || !currentUser || !cloudReady) return;
+      if (!supabaseClient || !currentUser || !cloudReady || cloudLoading) return;
       clearTimeout(cloudSyncTimer);
-      cloudSyncTimer = setTimeout(() => { saveCloudState().catch(() => {}); }, 700);
+      cloudSyncTimer = setTimeout(() => {
+        saveCloudState().catch((err) => {
+          console.error(err);
+          if (!lastSyncError) setSyncStatus(`保存失败：${getAuthErrorMessage(err)}`, 'error');
+        });
+      }, 700);
     }
 
     function renderAuthUser() {
@@ -203,16 +302,38 @@
       authUserEl.style.display = 'inline-flex';
       authUserEl.innerHTML = `<span>${getAccountName(currentUser)}</span><button id="btnSignOut" type="button">退出登录</button>`;
       document.getElementById('btnSignOut').addEventListener('click', async () => {
+        setSyncStatus('正在保存…', 'saving');
         await saveCloudState().catch(console.error);
         await supabaseClient.auth.signOut();
         restoreAppStorage({});
         currentUser = null;
         cloudReady = false;
+        cloudLoading = false;
         document.getElementById('appShell').classList.add('hidden');
         document.getElementById('authScreen').style.display = 'grid';
         renderAuthUser();
         setAuthStatus('已退出登录。');
+        setSyncStatus('未登录', 'idle');
       });
+    }
+
+    async function bootstrapAfterAuth() {
+      try {
+        await loadCloudState();
+      } catch (err) {
+        console.error(err);
+        setAuthStatus(`云端同步失败：${getAuthErrorMessage(err)}`, true);
+        await supabaseClient.auth.signOut();
+        currentUser = null;
+        cloudReady = false;
+        cloudLoading = false;
+        return false;
+      }
+      renderAuthUser();
+      showAppAfterAuth();
+      activate(getTargetModule());
+      setAuthStatus('');
+      return true;
     }
 
     function showAppAfterAuth() {
@@ -243,6 +364,13 @@
             originalRemoveItem(key);
             parent.postMessage({ type: 'assembly-storage-updated', key, value: null }, '*');
           };
+          window.addEventListener('message', (event) => {
+            if (!event.data || event.data.type !== 'assembly-apply-storage') return;
+            const incoming = event.data.payload || {};
+            Object.entries(incoming).forEach(([k, v]) => {
+              if (typeof v === 'string') originalSetItem(k, v);
+            });
+          });
         })();
       <\/script>`;
       return decodeHtml(pages[key]).replace('<head>', `<head>${bridge}`);
@@ -257,9 +385,10 @@
       if (key === 'outbound') loadFrame('outboundFrame', 'outbound', true);
       if (key === 'returns') loadFrame('returnsFrame', 'returns', true);
       localStorage.setItem('assembly_material_active_module_v1', key);
-      scheduleCloudSave();
+      if (cloudReady && !cloudLoading) scheduleCloudSave();
     }
-    function reloadInventoryFrame() { const frame = document.getElementById('inventoryFrame'); if (frame.dataset.loaded) { frame.srcdoc = decodeHtml(pages.inventory); } }
+    function reloadAllFrames(force = true) { frameMap.forEach(([frameId, key]) => loadFrame(frameId, key, force)); }
+    function reloadInventoryFrame() { loadFrame('inventoryFrame', 'inventory', true); }
     document.querySelectorAll('.switcher button').forEach(btn => btn.addEventListener('click', () => activate(btn.dataset.target)));
     window.addEventListener('message', (event) => {
       if (event.data && event.data.type === 'assembly-open-module' && event.data.module) activate(event.data.module);
@@ -285,7 +414,7 @@
       document.getElementById('authScreen').style.display = 'none';
       document.getElementById('appShell').classList.remove('hidden');
       activate(getTargetModule());
-      document.getElementById('moduleNote').querySelector('.pill').textContent = '仅本地保存（未配置 Supabase）';
+      setSyncStatus('仅本地保存（未配置 Supabase）', 'idle');
       console.warn('SUPABASE_URL / SUPABASE_ANON_KEY 未配置，已跳过登录。');
     } else {
       document.getElementById('btnSignIn').addEventListener('click', async () => {
@@ -297,11 +426,7 @@
           const { data, error } = await supabaseClient.auth.signInWithPassword({ email: accountToEmail(account), password });
           if (error) return setAuthStatus(getAuthErrorMessage(error), true);
           currentUser = data.user;
-          try { await loadCloudState(); } catch (err) { console.error(err); }
-          renderAuthUser();
-          showAppAfterAuth();
-          activate(getTargetModule());
-          setAuthStatus('');
+          await bootstrapAfterAuth();
         } catch (error) {
           setAuthStatus(getAuthErrorMessage(error), true);
         }
@@ -310,17 +435,19 @@
       supabaseClient.auth.getSession().then(async ({ data }) => {
         if (!data.session) return;
         currentUser = data.session.user;
-        try { await loadCloudState(); } catch (err) { console.error(err); }
-        renderAuthUser();
-        showAppAfterAuth();
-        activate(getTargetModule());
+        await bootstrapAfterAuth();
       });
 
       supabaseClient.auth.onAuthStateChange(async (event, session) => {
-        if (event === 'SIGNED_IN' && session?.user) {
+        if (event === 'SIGNED_OUT') {
+          currentUser = null;
+          cloudReady = false;
+          cloudLoading = false;
+          setSyncStatus('未登录', 'idle');
+        }
+        if (event === 'SIGNED_IN' && session?.user && !cloudReady && !cloudLoading) {
           currentUser = session.user;
-          renderAuthUser();
-          showAppAfterAuth();
+          await bootstrapAfterAuth();
         }
       });
     }

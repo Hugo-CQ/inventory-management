@@ -103,6 +103,7 @@
     const SUPABASE_URL = 'https://wkcgsvtdnsdwydusqepw.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndrY2dzdnRkbnNkd3lkdXNxZXB3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA1MzYyMjUsImV4cCI6MjA5NjExMjIyNX0.fQfFsDdj2E3oDYqgCI_DnPqVKwN4aZGgDi-ruN55Pd8';
     const APP_STORAGE_PREFIX = 'assembly_';
+    const APP_STORAGE_KEYS = new Set(['box_inventory_site_v1']);
     const STORAGE_TABLE = 'assembly_user_state';
     const hasSupabaseConfig = SUPABASE_URL && SUPABASE_ANON_KEY;
     const supabaseClient = hasSupabaseConfig ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
@@ -132,11 +133,15 @@
       return message || '登录失败，请稍后重试。';
     }
 
+    function isAppStorageKey(key) {
+      return Boolean(key) && (key.startsWith(APP_STORAGE_PREFIX) || APP_STORAGE_KEYS.has(key));
+    }
+
     function collectAppStorage() {
       const payload = {};
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (!key || !key.startsWith(APP_STORAGE_PREFIX)) continue;
+        if (!isAppStorageKey(key)) continue;
         payload[key] = localStorage.getItem(key);
       }
       return payload;
@@ -144,11 +149,11 @@
 
     function restoreAppStorage(payload) {
       Object.keys(localStorage)
-        .filter((key) => key.startsWith(APP_STORAGE_PREFIX))
+        .filter(isAppStorageKey)
         .forEach((key) => localStorage.removeItem(key));
       if (!payload || typeof payload !== 'object') return;
       Object.entries(payload).forEach(([key, value]) => {
-        if (key.startsWith(APP_STORAGE_PREFIX) && typeof value === 'string') localStorage.setItem(key, value);
+        if (isAppStorageKey(key) && typeof value === 'string') localStorage.setItem(key, value);
       });
     }
 
@@ -238,7 +243,7 @@
       }
     });
     window.addEventListener('storage', (event) => {
-      if (event.key && event.key.startsWith(APP_STORAGE_PREFIX)) scheduleCloudSave();
+      if (isAppStorageKey(event.key)) scheduleCloudSave();
     });
     function getTargetModule() {
       const saved = localStorage.getItem('assembly_material_active_module_v1');

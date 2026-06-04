@@ -51,10 +51,10 @@
   <section id="authScreen" class="auth-screen">
     <div class="auth-card">
       <h2>登录系统</h2>
-      <p class="auth-tip">使用 Supabase 账号登录后，系统会将当前账号的业务数据同步到云端。</p>
+      <p class="auth-tip">使用管理员分配的账号登录，业务数据会自动同步到云端。</p>
       <div class="auth-row">
-        <label for="authEmail">邮箱</label>
-        <input id="authEmail" type="email" placeholder="you@example.com" autocomplete="email" />
+        <label for="authEmail">账号</label>
+        <input id="authEmail" type="text" placeholder="请输入账号" autocomplete="username" />
       </div>
       <div class="auth-row">
         <label for="authPassword">密码</label>
@@ -62,7 +62,6 @@
       </div>
       <div class="auth-actions">
         <button id="btnSignIn" type="button">登录</button>
-        <button id="btnSignUp" type="button">注册</button>
       </div>
       <div id="authStatus" class="auth-status"></div>
     </div>
@@ -114,6 +113,10 @@
       const statusEl = document.getElementById('authStatus');
       statusEl.textContent = message || '';
       statusEl.classList.toggle('error', Boolean(isError));
+    }
+
+    function accountToEmail(account) {
+      return `${account.trim().toLowerCase()}@inventory.local`;
     }
 
     function collectAppStorage() {
@@ -237,11 +240,11 @@
       console.warn('SUPABASE_URL / SUPABASE_ANON_KEY 未配置，已跳过登录。');
     } else {
       document.getElementById('btnSignIn').addEventListener('click', async () => {
-        const email = document.getElementById('authEmail').value.trim();
+        const account = document.getElementById('authEmail').value.trim();
         const password = document.getElementById('authPassword').value;
-        if (!email || !password) return setAuthStatus('请输入邮箱和密码。', true);
+        if (!account || !password) return setAuthStatus('请输入账号和密码。', true);
         setAuthStatus('登录中...');
-        const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+        const { data, error } = await supabaseClient.auth.signInWithPassword({ email: accountToEmail(account), password });
         if (error) return setAuthStatus(error.message, true);
         currentUser = data.user;
         try { await loadCloudState(); } catch (err) { console.error(err); }
@@ -249,16 +252,6 @@
         showAppAfterAuth();
         activate(getTargetModule());
         setAuthStatus('');
-      });
-
-      document.getElementById('btnSignUp').addEventListener('click', async () => {
-        const email = document.getElementById('authEmail').value.trim();
-        const password = document.getElementById('authPassword').value;
-        if (!email || password.length < 6) return setAuthStatus('请填写邮箱，且密码至少 6 位。', true);
-        setAuthStatus('注册中...');
-        const { error } = await supabaseClient.auth.signUp({ email, password });
-        if (error) return setAuthStatus(error.message, true);
-        setAuthStatus('注册成功，请检查邮箱验证后再登录。');
       });
 
       supabaseClient.auth.getSession().then(async ({ data }) => {

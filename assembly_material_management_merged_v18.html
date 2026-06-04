@@ -227,7 +227,27 @@
       returns: '<strong>当前模块：退料管理。</strong>用于根据已出库单发起退料、填写退料确认表；合格退料加回库存，待检/异常/报废只生成退料记录。'
     };
     function decodeHtml(b64) { const bin = atob(b64); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return new TextDecoder('utf-8').decode(bytes); }
-    function loadFrame(id, key, force = false) { const frame = document.getElementById(id); if (force || !frame.dataset.loaded) { frame.srcdoc = decodeHtml(pages[key]); frame.dataset.loaded = '1'; } }
+    function buildFrameHtml(key) {
+      const payload = btoa(unescape(encodeURIComponent(JSON.stringify(collectAppStorage()))));
+      const bridge = `<script>
+        (() => {
+          const payload = JSON.parse(decodeURIComponent(escape(atob('${payload}'))));
+          Object.entries(payload).forEach(([key, value]) => localStorage.setItem(key, value));
+          const originalSetItem = localStorage.setItem.bind(localStorage);
+          const originalRemoveItem = localStorage.removeItem.bind(localStorage);
+          localStorage.setItem = (key, value) => {
+            originalSetItem(key, value);
+            parent.postMessage({ type: 'assembly-storage-updated', key, value: String(value) }, '*');
+          };
+          localStorage.removeItem = (key) => {
+            originalRemoveItem(key);
+            parent.postMessage({ type: 'assembly-storage-updated', key, value: null }, '*');
+          };
+        })();
+      <\/script>`;
+      return decodeHtml(pages[key]).replace('<head>', `<head>${bridge}`);
+    }
+    function loadFrame(id, key, force = false) { const frame = document.getElementById(id); if (force || !frame.dataset.loaded) { frame.srcdoc = buildFrameHtml(key); frame.dataset.loaded = '1'; } }
     function activate(key) {
       document.querySelectorAll('.switcher button').forEach(btn => btn.classList.toggle('active', btn.dataset.target === key));
       ['inventory','picking','outbound','returns'].forEach(name => document.getElementById(name + 'Wrap').classList.toggle('active', key === name));
@@ -245,6 +265,11 @@
       if (event.data && event.data.type === 'assembly-open-module' && event.data.module) activate(event.data.module);
       if (event.data && event.data.type === 'assembly-inventory-updated') {
         reloadInventoryFrame();
+        scheduleCloudSave();
+      }
+      if (event.data && event.data.type === 'assembly-storage-updated' && isAppStorageKey(event.data.key)) {
+        if (event.data.value === null) localStorage.removeItem(event.data.key);
+        else localStorage.setItem(event.data.key, event.data.value);
         scheduleCloudSave();
       }
     });

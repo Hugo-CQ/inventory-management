@@ -109,6 +109,7 @@
     const supabaseClient = hasSupabaseConfig ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
     let currentUser = null;
     let cloudSyncTimer = null;
+    let cloudReady = false;
 
     function setAuthStatus(message, isError = false) {
       const statusEl = document.getElementById('authStatus');
@@ -159,6 +160,7 @@
 
     async function loadCloudState() {
       if (!supabaseClient || !currentUser) return;
+      cloudReady = false;
       const { data, error } = await supabaseClient
         .from(STORAGE_TABLE)
         .select('payload')
@@ -168,12 +170,15 @@
       if (data) {
         restoreAppStorage(data.payload);
       } else {
+        cloudReady = true;
         await saveCloudState();
+        return;
       }
+      cloudReady = true;
     }
 
     async function saveCloudState() {
-      if (!supabaseClient || !currentUser) return;
+      if (!supabaseClient || !currentUser || !cloudReady) return;
       const payload = collectAppStorage();
       const { error } = await supabaseClient.from(STORAGE_TABLE).upsert(
         { user_id: currentUser.id, payload, updated_at: new Date().toISOString() },
@@ -183,7 +188,7 @@
     }
 
     function scheduleCloudSave() {
-      if (!supabaseClient || !currentUser) return;
+      if (!supabaseClient || !currentUser || !cloudReady) return;
       clearTimeout(cloudSyncTimer);
       cloudSyncTimer = setTimeout(() => { saveCloudState().catch(() => {}); }, 700);
     }
@@ -202,6 +207,7 @@
         await supabaseClient.auth.signOut();
         restoreAppStorage({});
         currentUser = null;
+        cloudReady = false;
         document.getElementById('appShell').classList.add('hidden');
         document.getElementById('authScreen').style.display = 'grid';
         renderAuthUser();

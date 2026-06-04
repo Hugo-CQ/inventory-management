@@ -101,12 +101,12 @@
   </div>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
-    const SUPABASE_URL = '';
-    const SUPABASE_ANON_KEY = '';
+    const SUPABASE_URL = 'https://wkcgsvtdnsdwydusqepw.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndrY2dzdnRkbnNkd3lkdXNxZXB3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA1MzYyMjUsImV4cCI6MjA5NjExMjIyNX0.fQfFsDdj2E3oDYqgCI_DnPqVKwN4aZGgDi-ruN55Pd8';
     const APP_STORAGE_PREFIX = 'assembly_';
     const STORAGE_TABLE = 'assembly_user_state';
     const hasSupabaseConfig = SUPABASE_URL && SUPABASE_ANON_KEY;
-    const supabase = hasSupabaseConfig ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+    const supabaseClient = hasSupabaseConfig ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
     let currentUser = null;
     let cloudSyncTimer = null;
 
@@ -137,20 +137,24 @@
     }
 
     async function loadCloudState() {
-      if (!supabase || !currentUser) return;
-      const { data, error } = await supabase
+      if (!supabaseClient || !currentUser) return;
+      const { data, error } = await supabaseClient
         .from(STORAGE_TABLE)
         .select('payload')
         .eq('user_id', currentUser.id)
         .maybeSingle();
       if (error) throw error;
-      restoreAppStorage(data ? data.payload : null);
+      if (data) {
+        restoreAppStorage(data.payload);
+      } else {
+        await saveCloudState();
+      }
     }
 
     async function saveCloudState() {
-      if (!supabase || !currentUser) return;
+      if (!supabaseClient || !currentUser) return;
       const payload = collectAppStorage();
-      const { error } = await supabase.from(STORAGE_TABLE).upsert(
+      const { error } = await supabaseClient.from(STORAGE_TABLE).upsert(
         { user_id: currentUser.id, payload, updated_at: new Date().toISOString() },
         { onConflict: 'user_id' }
       );
@@ -158,7 +162,7 @@
     }
 
     function scheduleCloudSave() {
-      if (!supabase || !currentUser) return;
+      if (!supabaseClient || !currentUser) return;
       clearTimeout(cloudSyncTimer);
       cloudSyncTimer = setTimeout(() => { saveCloudState().catch(() => {}); }, 700);
     }
@@ -173,7 +177,9 @@
       authUserEl.style.display = 'inline-flex';
       authUserEl.innerHTML = `<span>${currentUser.email || currentUser.id}</span><button id="btnSignOut" type="button">退出登录</button>`;
       document.getElementById('btnSignOut').addEventListener('click', async () => {
-        await supabase.auth.signOut();
+        await saveCloudState().catch(console.error);
+        await supabaseClient.auth.signOut();
+        restoreAppStorage({});
         currentUser = null;
         document.getElementById('appShell').classList.add('hidden');
         document.getElementById('authScreen').style.display = 'grid';
@@ -204,6 +210,7 @@
       if (key === 'outbound') loadFrame('outboundFrame', 'outbound', true);
       if (key === 'returns') loadFrame('returnsFrame', 'returns', true);
       localStorage.setItem('assembly_material_active_module_v1', key);
+      scheduleCloudSave();
     }
     function reloadInventoryFrame() { const frame = document.getElementById('inventoryFrame'); if (frame.dataset.loaded) { frame.srcdoc = decodeHtml(pages.inventory); } }
     document.querySelectorAll('.switcher button').forEach(btn => btn.addEventListener('click', () => activate(btn.dataset.target)));
@@ -214,13 +221,18 @@
         scheduleCloudSave();
       }
     });
-    const saved = localStorage.getItem('assembly_material_active_module_v1');
-    const targetModule = ['inventory','picking','outbound','returns'].includes(saved) ? saved : 'inventory';
+    window.addEventListener('storage', (event) => {
+      if (event.key && event.key.startsWith(APP_STORAGE_PREFIX)) scheduleCloudSave();
+    });
+    function getTargetModule() {
+      const saved = localStorage.getItem('assembly_material_active_module_v1');
+      return ['inventory','picking','outbound','returns'].includes(saved) ? saved : 'inventory';
+    }
 
     if (!hasSupabaseConfig) {
       document.getElementById('authScreen').style.display = 'none';
       document.getElementById('appShell').classList.remove('hidden');
-      activate(targetModule);
+      activate(getTargetModule());
       document.getElementById('moduleNote').querySelector('.pill').textContent = '仅本地保存（未配置 Supabase）';
       console.warn('SUPABASE_URL / SUPABASE_ANON_KEY 未配置，已跳过登录。');
     } else {
@@ -229,13 +241,13 @@
         const password = document.getElementById('authPassword').value;
         if (!email || !password) return setAuthStatus('请输入邮箱和密码。', true);
         setAuthStatus('登录中...');
-        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+        const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
         if (error) return setAuthStatus(error.message, true);
         currentUser = data.user;
         try { await loadCloudState(); } catch (err) { console.error(err); }
         renderAuthUser();
         showAppAfterAuth();
-        activate(targetModule);
+        activate(getTargetModule());
         setAuthStatus('');
       });
 
@@ -244,21 +256,21 @@
         const password = document.getElementById('authPassword').value;
         if (!email || password.length < 6) return setAuthStatus('请填写邮箱，且密码至少 6 位。', true);
         setAuthStatus('注册中...');
-        const { error } = await supabase.auth.signUp({ email, password });
+        const { error } = await supabaseClient.auth.signUp({ email, password });
         if (error) return setAuthStatus(error.message, true);
         setAuthStatus('注册成功，请检查邮箱验证后再登录。');
       });
 
-      supabase.auth.getSession().then(async ({ data }) => {
+      supabaseClient.auth.getSession().then(async ({ data }) => {
         if (!data.session) return;
         currentUser = data.session.user;
         try { await loadCloudState(); } catch (err) { console.error(err); }
         renderAuthUser();
         showAppAfterAuth();
-        activate(targetModule);
+        activate(getTargetModule());
       });
 
-      supabase.auth.onAuthStateChange(async (event, session) => {
+      supabaseClient.auth.onAuthStateChange(async (event, session) => {
         if (event === 'SIGNED_IN' && session?.user) {
           currentUser = session.user;
           renderAuthUser();
